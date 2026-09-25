@@ -1,0 +1,21 @@
+# Binaries
+app
+*.exe
+
+# Dependencies
+frontend/node_modules/
+
+# Environment
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+
+# Worktrees
+.worktrees/
