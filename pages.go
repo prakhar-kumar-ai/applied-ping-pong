@@ -680,9 +680,12 @@ const adminPageHTML = `<!DOCTYPE html>
       <span class="text-2xl">🏓</span>
       <h1 class="text-lg font-bold">Ping Pong Admin</h1>
     </div>
-    <div class="flex items-center gap-4">
+    <div class="flex items-center gap-4 flex-wrap justify-end">
       <a href="/bracket" target="_blank" class="text-sm text-gray-300 hover:text-white underline">Public bracket ↗</a>
-      <button onclick="resetTournament()" class="text-sm bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded-lg">🗑 Reset Tournament</button>
+      <a id="sheetLink" href="#" target="_blank" class="hidden text-sm text-green-300 hover:text-white underline">📊 Google Sheet ↗</a>
+      <button id="sheetSyncBtn" onclick="syncFromSheet()" class="hidden text-sm bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded-lg" title="Apply names/scores edited directly in the Google Sheet">↻ Sync from Sheet</button>
+      <span id="sheetStatus" class="hidden text-xs text-gray-400"></span>
+      <button onclick="resetTournament()" class="text-xs text-red-300 hover:text-red-100 underline" title="Deletes everything — requires typing RESET">Reset…</button>
       <button onclick="logout()" class="text-sm text-gray-400 hover:text-white">Logout</button>
     </div>
   </header>
@@ -767,6 +770,32 @@ const adminPageHTML = `<!DOCTYPE html>
   </div>
 </div>
 
+<!-- Edit team names modal -->
+<div id="editTeamModal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 hidden">
+  <div class="bg-white rounded-2xl shadow-xl p-6 w-full max-w-md">
+    <h3 class="font-bold text-gray-900 mb-1">✏️ Edit Team</h3>
+    <p id="editTeamLabel" class="text-sm text-gray-500 mb-4"></p>
+    <div class="space-y-4 mb-4">
+      <div class="p-3 bg-gray-50 rounded-lg">
+        <p class="text-xs font-bold text-gray-400 uppercase mb-2">Player 1</p>
+        <input id="et1n" type="text" placeholder="Full name" class="w-full border rounded-lg px-3 py-2 text-sm mb-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"/>
+        <input id="et1e" type="email" placeholder="Email (optional)" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"/>
+      </div>
+      <div class="p-3 bg-gray-50 rounded-lg">
+        <p class="text-xs font-bold text-gray-400 uppercase mb-2">Player 2</p>
+        <input id="et2n" type="text" placeholder="Full name" class="w-full border rounded-lg px-3 py-2 text-sm mb-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"/>
+        <input id="et2e" type="email" placeholder="Email (optional)" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"/>
+      </div>
+    </div>
+    <p class="text-xs text-gray-400 mb-4">Names update everywhere immediately — bracket and standings. Existing scores are kept.</p>
+    <div id="editTeamErr" class="text-red-500 text-sm mb-3 hidden"></div>
+    <div class="flex gap-3">
+      <button onclick="closeEditTeam()" class="flex-1 py-2 border rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-50">Cancel</button>
+      <button onclick="saveEditTeam()" id="editTeamSaveBtn" class="flex-1 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium">Save Names</button>
+    </div>
+  </div>
+</div>
+
 <!-- Schedule modal -->
 <div id="scheduleModal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 hidden">
   <div class="bg-white rounded-2xl shadow-xl p-6 w-full max-w-sm">
@@ -804,6 +833,9 @@ let currentTeam2Name = '';
 let swapPlayerID = '';
 let swapPlayerName = '';
 let allMatches = {}; // matchID → match object, populated in loadBracket()
+let allTeams = {};   // teamID → team object, populated in loadTeams()
+let editTeamID = '';
+let tournActive = false; // true once a bracket exists — hides destructive/setup-only controls
 
 function adminFetch(url, opts={}) {
   return fetch(url, {...opts, headers: {'Content-Type':'application/json','X-Admin-Token':token,...(opts.headers||{})}});
@@ -832,16 +864,105 @@ function logout() { localStorage.removeItem(TOKEN_KEY); token=''; location.reloa
 
 async function resetTournament() {
   if (!confirm('⚠️ This will DELETE all registrations, teams, matches, and scores. Are you sure?')) return;
-  if (!confirm('Really reset everything? This cannot be undone.')) return;
+  const typed = prompt('This cannot be undone. Type RESET (all caps) to confirm:');
+  if (typed !== 'RESET') { alert('Reset cancelled — nothing was changed.'); return; }
   const res = await adminFetch('/api/admin/reset', {method:'POST'});
-  if (res.ok) { alert('Tournament reset! Starting fresh.'); showTab('reg'); loadReg(); }
+  if (res.ok) { alert('Tournament reset! Starting fresh.'); tournActive = false; showTab('reg'); loadReg(); }
   else { alert('Reset failed.'); }
 }
 
-function showDashboard() {
+async function refreshTournActive() {
+  try {
+    const s = await fetch('/api/tournament/status').then(r=>r.json());
+    tournActive = s.tournament_status === 'active' || s.tournament_status === 'complete';
+  } catch { tournActive = false; }
+  return tournActive;
+}
+
+async function showDashboard() {
   document.getElementById('loginScreen').classList.add('hidden');
   document.getElementById('dashboard').classList.remove('hidden');
-  loadReg();
+  loadSheetStatus();
+  await refreshTournActive();
+  // During a live tournament the scores tab is what admins need; setup tabs stay one click away.
+  showTab(tournActive ? 'bracket' : 'reg');
+}
+
+// --- Google Sheets sync ---
+async function loadSheetStatus() {
+  try {
+    const s = await adminFetch('/api/admin/sheets/status').then(r=>r.json());
+    if (!s.enabled) return;
+    const link = document.getElementById('sheetLink');
+    link.href = s.url; link.classList.remove('hidden');
+    document.getElementById('sheetSyncBtn').classList.remove('hidden');
+    const st = document.getElementById('sheetStatus');
+    st.classList.remove('hidden');
+    if (s.last_error) { st.textContent = '⚠️ sheet: ' + s.last_error.slice(0, 80); st.className = 'text-xs text-amber-300'; }
+    else if (s.last_push) { st.textContent = 'saved ' + new Date(s.last_push).toLocaleTimeString(); st.className = 'text-xs text-gray-400'; }
+  } catch {}
+}
+
+async function syncFromSheet() {
+  const btn = document.getElementById('sheetSyncBtn');
+  btn.textContent = 'Syncing…'; btn.disabled = true;
+  try {
+    const res = await adminFetch('/api/admin/sheets/pull', {method:'POST'});
+    const d = await res.json().catch(()=>({}));
+    if (!res.ok) { alert('Sync failed: ' + (d.error || 'unknown error')); return; }
+    const r = d.result || {};
+    let msg = 'Applied ' + (r.name_changes||0) + ' name change(s) and ' + (r.score_changes||0) + ' score change(s) from the sheet.';
+    if (r.warnings && r.warnings.length) msg += '\n\nSkipped:\n• ' + r.warnings.join('\n• ');
+    alert(msg);
+    const active = document.querySelector('[id^="tab-content-"]:not(.hidden)');
+    if (active) showTab(active.id.replace('tab-content-',''));
+    loadSheetStatus();
+  } finally { btn.textContent = '↻ Sync from Sheet'; btn.disabled = false; }
+}
+
+// --- Edit team names ---
+function openEditTeam(teamID) {
+  const t = allTeams[teamID];
+  if (!t) return;
+  editTeamID = teamID;
+  document.getElementById('editTeamLabel').textContent = teamName(t);
+  document.getElementById('et1n').value = t.player1?.name || '';
+  document.getElementById('et1e').value = t.player1?.email || '';
+  document.getElementById('et2n').value = t.player2?.name || '';
+  document.getElementById('et2e').value = t.player2?.email || '';
+  document.getElementById('editTeamErr').classList.add('hidden');
+  document.getElementById('editTeamModal').classList.remove('hidden');
+  setTimeout(() => document.getElementById('et1n').focus(), 50);
+}
+
+function closeEditTeam() { document.getElementById('editTeamModal').classList.add('hidden'); editTeamID = ''; }
+
+async function saveEditTeam() {
+  const t = allTeams[editTeamID];
+  if (!t) return;
+  const n1 = document.getElementById('et1n').value.trim(), e1 = document.getElementById('et1e').value.trim();
+  const n2 = document.getElementById('et2n').value.trim(), e2 = document.getElementById('et2e').value.trim();
+  const err = document.getElementById('editTeamErr');
+  if (!n1 || !n2) { err.textContent = 'Both player names are required.'; err.classList.remove('hidden'); return; }
+  const btn = document.getElementById('editTeamSaveBtn');
+  btn.textContent = 'Saving…'; btn.disabled = true;
+  try {
+    const updates = [];
+    if (t.player1 && (n1 !== t.player1.name || (e1 && e1 !== t.player1.email)))
+      updates.push(adminFetch('/api/admin/players/'+t.player1.id, {method:'PUT', body: JSON.stringify({name:n1, email:e1})}));
+    if (t.player2 && (n2 !== t.player2.name || (e2 && e2 !== t.player2.email)))
+      updates.push(adminFetch('/api/admin/players/'+t.player2.id, {method:'PUT', body: JSON.stringify({name:n2, email:e2})}));
+    const results = await Promise.all(updates);
+    const failed = results.find(r => !r.ok);
+    if (failed) {
+      const d = await failed.json().catch(()=>({}));
+      err.textContent = 'Save failed: ' + (d.error || 'unknown error'); err.classList.remove('hidden');
+      return;
+    }
+    closeEditTeam();
+    loadTeams();
+    loadSheetStatus();
+  } finally { btn.textContent = 'Save Names'; btn.disabled = false; }
 }
 
 // --- Tabs ---
@@ -896,7 +1017,7 @@ async function loadReg() {
       ${odd && !open ? '<div class="bg-orange-50 border border-orange-200 rounded-lg p-3 mb-4 text-sm text-orange-800">⚠️ <strong>Odd number of players ('+players.length+')</strong> — one player will be left without a partner.</div>' : ''}
       ${players.length===0 ? '<div class="bg-white rounded-xl p-8 text-center text-gray-400 shadow">No registrations yet. Share the registration link!</div>' :
       '<div class="bg-white rounded-xl shadow overflow-hidden"><table class="w-full text-sm"><thead class="bg-gray-50"><tr><th class="text-left p-3 font-medium text-gray-600">#</th><th class="text-left p-3 font-medium text-gray-600">Name</th><th class="text-left p-3 font-medium text-gray-600">Email</th><th class="text-left p-3 font-medium text-gray-600">Registered</th><th class="p-3"></th></tr></thead><tbody>'+rows+'</tbody></table></div>'}
-      <div class="mt-6 bg-yellow-50 border border-yellow-200 rounded-xl p-4">
+      <div class="mt-6 bg-yellow-50 border border-yellow-200 rounded-xl p-4 ${tournActive ? 'hidden' : ''}">
         <p class="text-xs font-bold text-yellow-700 uppercase tracking-wide mb-2">🧪 Testing Tools</p>
         <div class="flex items-center gap-3">
           <input id="testCount" type="number" min="1" max="100" value="10" placeholder="# players"
@@ -941,37 +1062,55 @@ async function loadTeams() {
   const el = document.getElementById('tab-content-teams');
   el.innerHTML = '<p class="text-gray-400">Loading...</p>';
   try {
-    const data = await adminFetch('/api/admin/teams').then(r=>r.json());
+    const [data, br] = await Promise.all([
+      adminFetch('/api/admin/teams').then(r=>r.json()),
+      fetch('/api/tournament/bracket').then(r=>r.json()).catch(()=>({}))
+    ]);
     const teams = data.teams || [];
-    let cards = teams.map((t,i) => {
+    allTeams = {};
+    teams.forEach(t => { allTeams[t.id] = t; });
+    tournActive = !!br.tournament;
+    // teamID → group letter (only once the bracket exists)
+    const groupOf = {};
+    const letters = 'ABCDEFGH';
+    (br.groups || []).forEach((grp, gi) => (grp || []).forEach(t => { if (t) groupOf[t.id] = letters[gi] || ''; }));
+    const ordered = tournActive
+      ? [...teams].sort((a,b) => (groupOf[a.id]||'Z').localeCompare(groupOf[b.id]||'Z'))
+      : teams;
+    let cards = ordered.map((t,i) => {
       const players = [t.player1, t.player2].map(p => ` + "`" + `
         <button onclick="handlePlayerClick('${p.id}','${p.name.replace(/'/g,"\\'")}',this)"
           class="player-btn w-full text-left px-3 py-2 rounded-lg mb-1 text-sm bg-gray-50 hover:bg-gray-100 transition-colors" data-pid="${p.id}">
           <span class="font-medium">${p.name}</span>
           <span class="text-xs text-gray-400 block truncate">${p.email}</span>
         </button>` + "`" + `).join('');
+      const badge = groupOf[t.id] ? '<span class="text-xs font-bold bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-full px-2 py-0.5">Group '+groupOf[t.id]+'</span>' : '<span class="text-xs font-bold text-gray-400 uppercase">Team '+(i+1)+'</span>';
       return ` + "`" + `
         <div class="bg-white rounded-xl shadow p-4 border border-gray-100">
-          <p class="text-xs font-bold text-gray-400 uppercase mb-3">Team ${i+1}</p>
+          <div class="flex justify-between items-center mb-3">
+            ${badge}
+            <button onclick="openEditTeam('${t.id}')" class="text-xs font-medium text-indigo-600 hover:text-indigo-800 hover:bg-indigo-50 px-2 py-1 rounded-lg" title="Edit player names / emails">✏️ Edit names</button>
+          </div>
           ${players}
         </div>` + "`" + `;
     }).join('');
-    el.innerHTML = ` + "`" + `
-      <div class="flex justify-between items-center mb-4">
-        <div><h2 class="text-xl font-bold text-gray-900">Teams</h2><p class="text-sm text-gray-500">${teams.length} team${teams.length!==1?'s':''}</p></div>
-        <div class="flex gap-3">
-          <button onclick="rerandomizeTeams()" ${teams.length<2?'disabled':''} class="px-4 py-2 bg-gray-100 hover:bg-gray-200 disabled:bg-gray-50 text-gray-700 text-sm font-medium rounded-lg border border-gray-300">
+    const setupBtns = tournActive
+      ? '<span class="text-xs text-gray-400 self-center">Bracket generated — teams are locked. Use ✏️ Edit names to fix a name.</span>'
+      : ` + "`" + `<button onclick="rerandomizeTeams()" ${teams.length<2?'disabled':''} class="px-4 py-2 bg-gray-100 hover:bg-gray-200 disabled:bg-gray-50 text-gray-700 text-sm font-medium rounded-lg border border-gray-300">
             🎲 Re-randomize
           </button>
           <button onclick="generateBracket()" ${teams.length<2?'disabled':''} class="px-4 py-2 bg-green-600 hover:bg-green-700 disabled:bg-green-200 text-white text-sm font-medium rounded-lg">
             🏆 Lock Teams & Generate Bracket
-          </button>
-        </div>
+          </button>` + "`" + `;
+    el.innerHTML = ` + "`" + `
+      <div class="flex justify-between items-center mb-4">
+        <div><h2 class="text-xl font-bold text-gray-900">Teams</h2><p class="text-sm text-gray-500">${teams.length} team${teams.length!==1?'s':''}</p></div>
+        <div class="flex gap-3">${setupBtns}</div>
       </div>
       <div id="swapBanner" class="hidden bg-indigo-50 border border-indigo-200 rounded-lg p-3 mb-4 text-sm text-indigo-800"></div>
       ${teams.length===0 ? '<div class="bg-white rounded-xl p-8 text-center text-gray-400 shadow">No teams yet. Go to Registrations and randomize first.</div>' :
       '<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">'+cards+'</div>'}
-      <p class="text-xs text-gray-400 mt-4">💡 Click a player to select, then click another to swap them.</p>
+      <p class="text-xs text-gray-400 mt-4">💡 ✏️ Edit names to fix a player's name or email. Click a player, then another, to swap partners.</p>
     ` + "`" + `;
   } catch(e) { el.innerHTML = '<p class="text-red-400">Failed to load.</p>'; }
 }

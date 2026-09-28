@@ -564,36 +564,9 @@ func handleAdminEnterScore() gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		if len(req.Games) == 0 || len(req.Games) > 3 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "must provide 1–3 games"})
-			return
-		}
-
-		// Validate each game and tally wins.
-		t1Wins, t2Wins := 0, 0
-		for i, g := range req.Games {
-			if g.Team1Score == nil || g.Team2Score == nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("game %d: both scores are required", i+1)})
-				return
-			}
-			if *g.Team1Score < 0 || *g.Team2Score < 0 {
-				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("game %d: scores cannot be negative", i+1)})
-				return
-			}
-			if *g.Team1Score == *g.Team2Score {
-				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("game %d: scores cannot be tied", i+1)})
-				return
-			}
-			if *g.Team1Score > *g.Team2Score {
-				t1Wins++
-			} else {
-				t2Wins++
-			}
-		}
-
-		// One team must have won 2 games (best of 3).
-		if t1Wins < 2 && t2Wins < 2 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "match not decided — a team needs 2 game wins"})
+		t1Wins, t2Wins, err := validateGames(req.Games)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 
@@ -608,80 +581,119 @@ func handleAdminEnterScore() gin.HandlerFunc {
 			return
 		}
 
-		wasComplete := m.Status == "complete"
-
-		m.Games = req.Games
-		m.Team1Score = &t1Wins
-		m.Team2Score = &t2Wins
-		m.Status = "complete"
-
-		if m.Team1 != nil && m.Team2 != nil {
-			if t1Wins > t2Wins {
-				wid := m.Team1.ID
-				m.WinnerTeamID = &wid
-			} else {
-				wid := m.Team2.ID
-				m.WinnerTeamID = &wid
-			}
-		}
-
-		// On first completion (pending→complete) always re-seed downstream stages.
-		// On re-edit (complete→complete) only re-seed if downstream matches haven't
-		// been played yet — prevents corrupting results already in progress.
-		if !wasComplete {
-			switch m.Round {
-			case "rr":
-				maybeAssignFromRR()
-			case "qf":
-				maybeAssignSFFromQF()
-			case "sf":
-				maybeAssignFinalFromSF()
-			}
-		} else {
-			log.Printf("[Admin] score re-edit on match %s — checking downstream safety", matchID)
-			switch m.Round {
-			case "rr":
-				knockoutStarted := false
-				for _, km := range store.matches {
-					if (km.Round == "qf" || km.Round == "sf" || km.Round == "final") && km.Status == "complete" {
-						knockoutStarted = true
-						break
-					}
-				}
-				if !knockoutStarted {
-					maybeAssignFromRR()
-					log.Printf("[Admin] re-ran RR seeding after score re-edit (knockout not yet started)")
-				}
-			case "qf":
-				sfStarted := false
-				for _, sm := range store.matches {
-					if sm.Round == "sf" && sm.Status == "complete" {
-						sfStarted = true
-						break
-					}
-				}
-				if !sfStarted {
-					maybeAssignSFFromQF()
-					log.Printf("[Admin] re-ran QF→SF seeding after score re-edit")
-				}
-			case "sf":
-				finalDone := false
-				for _, fm := range store.matches {
-					if fm.Round == "final" && fm.Status == "complete" {
-						finalDone = true
-						break
-					}
-				}
-				if !finalDone {
-					maybeAssignFinalFromSF()
-					log.Printf("[Admin] re-ran SF→Final seeding after score re-edit")
-				}
-			}
-		}
+		wasComplete := applyMatchScore(m, req.Games, t1Wins, t2Wins)
 
 		go saveStateWithFallback(c.Request.Context())
 		c.JSON(http.StatusOK, gin.H{"success": true, "was_edit": wasComplete})
 	}
+}
+
+// validateGames checks a best-of-3 game list (1–3 games, both scores present, no ties,
+// one team with 2 wins) and returns the game-win tally. Shared by the admin API and the
+// Google Sheets pull so both paths enforce identical rules.
+func validateGames(games []GameScore) (t1Wins, t2Wins int, err error) {
+	if len(games) == 0 || len(games) > 3 {
+		return 0, 0, fmt.Errorf("must provide 1–3 games")
+	}
+	for i, g := range games {
+		if g.Team1Score == nil || g.Team2Score == nil {
+			return 0, 0, fmt.Errorf("game %d: both scores are required", i+1)
+		}
+		if *g.Team1Score < 0 || *g.Team2Score < 0 {
+			return 0, 0, fmt.Errorf("game %d: scores cannot be negative", i+1)
+		}
+		if *g.Team1Score == *g.Team2Score {
+			return 0, 0, fmt.Errorf("game %d: scores cannot be tied", i+1)
+		}
+		if *g.Team1Score > *g.Team2Score {
+			t1Wins++
+		} else {
+			t2Wins++
+		}
+	}
+	// One team must have won 2 games (best of 3).
+	if t1Wins < 2 && t2Wins < 2 {
+		return 0, 0, fmt.Errorf("match not decided — a team needs 2 game wins")
+	}
+	return t1Wins, t2Wins, nil
+}
+
+// applyMatchScore records validated games on m, marks it complete and seeds downstream
+// stages. Returns whether the match was already complete (a re-edit).
+// Must be called with store.mu held (write).
+func applyMatchScore(m *Match, games []GameScore, t1Wins, t2Wins int) (wasComplete bool) {
+	wasComplete = m.Status == "complete"
+
+	m.Games = games
+	m.Team1Score = &t1Wins
+	m.Team2Score = &t2Wins
+	m.Status = "complete"
+
+	if m.Team1 != nil && m.Team2 != nil {
+		if t1Wins > t2Wins {
+			wid := m.Team1.ID
+			m.WinnerTeamID = &wid
+		} else {
+			wid := m.Team2.ID
+			m.WinnerTeamID = &wid
+		}
+	}
+
+	// On first completion (pending→complete) always re-seed downstream stages.
+	// On re-edit (complete→complete) only re-seed if downstream matches haven't
+	// been played yet — prevents corrupting results already in progress.
+	if !wasComplete {
+		switch m.Round {
+		case "rr":
+			maybeAssignFromRR()
+		case "qf":
+			maybeAssignSFFromQF()
+		case "sf":
+			maybeAssignFinalFromSF()
+		}
+		return wasComplete
+	}
+
+	log.Printf("[Admin] score re-edit on match %s — checking downstream safety", m.ID)
+	switch m.Round {
+	case "rr":
+		knockoutStarted := false
+		for _, km := range store.matches {
+			if (km.Round == "qf" || km.Round == "sf" || km.Round == "final") && km.Status == "complete" {
+				knockoutStarted = true
+				break
+			}
+		}
+		if !knockoutStarted {
+			maybeAssignFromRR()
+			log.Printf("[Admin] re-ran RR seeding after score re-edit (knockout not yet started)")
+		}
+	case "qf":
+		sfStarted := false
+		for _, sm := range store.matches {
+			if sm.Round == "sf" && sm.Status == "complete" {
+				sfStarted = true
+				break
+			}
+		}
+		if !sfStarted {
+			maybeAssignSFFromQF()
+			log.Printf("[Admin] re-ran QF→SF seeding after score re-edit")
+		}
+	case "sf":
+		finalDone := false
+		for _, fm := range store.matches {
+			if fm.Round == "final" && fm.Status == "complete" {
+				finalDone = true
+				break
+			}
+		}
+		if !finalDone {
+			maybeAssignFinalFromSF()
+			log.Printf("[Admin] re-ran SF→Final seeding after score re-edit")
+		}
+	}
+	return wasComplete
 }
 
 // ---- Standings helper ----
@@ -1513,6 +1525,7 @@ func registerTournamentRoutes(api *gin.RouterGroup) {
 	admin.POST("/seed", handleAdminSeed())
 	admin.POST("/test/generate", handleAdminGenerateTestPlayers())
 	registerScheduleRoutes(admin)
+	registerSheetsRoutes(admin)
 
 	log.Printf("[Tournament] routes registered")
 }

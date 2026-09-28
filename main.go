@@ -56,14 +56,28 @@ func main() {
 	}
 
 	// Initialize tournament store.
-	// Try to restore from Secret Manager first; fall back to seeding fresh data.
+	// Restore order: Google Sheet (State tab) → Secret Manager → GCS → seed + Friday fallback.
 	store = newStore()
-	if !loadStateWithFallback(context.Background()) {
+	restored := loadStateFromSheet(context.Background())
+	if !restored {
+		restored = loadStateWithFallback(context.Background())
+	}
+	if !restored {
 		seedTournamentData()
 		resumeFridayTournament()
-		go saveStateWithFallback(context.Background())
 	}
-	zap.L().Info("tournament store initialized")
+	if sheetsEnabled() {
+		// Apply any names/scores edited directly in the sheet while the app was down.
+		if res, err := syncFromSheet(context.Background()); err != nil {
+			zap.L().Warn("sheets: initial pull failed", zap.Error(err))
+		} else if res.NameChanges+res.ScoreChanges > 0 {
+			zap.L().Info("sheets: applied edits from sheet on boot",
+				zap.Int("name_changes", res.NameChanges), zap.Int("score_changes", res.ScoreChanges))
+		}
+	}
+	go saveStateWithFallback(context.Background())
+	startSheetsPoller()
+	zap.L().Info("tournament store initialized", zap.Bool("restored", restored), zap.Bool("sheets", sheetsEnabled()))
 
 	registerSlackHandlers(bot)
 	RegisterScheduleHandlers(bot) // sets botRef, registers "can't make it" action

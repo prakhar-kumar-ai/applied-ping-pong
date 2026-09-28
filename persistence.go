@@ -339,17 +339,17 @@ func min(a, b int) int {
 	return b
 }
 
-// saveState saves via Secret Manager first; falls back to GCS on permission error.
-func saveStateWithFallback(ctx context.Context) {
-	project := smProjectID()
-	if project == "" {
-		return
-	}
+// saveStateWithFallback saves to Google Sheets (primary, see sheets.go), then Secret Manager,
+// then GCS. Callers fire it as a goroutine right after a mutation; the passed-in context is
+// usually the HTTP request's, which Gin cancels as soon as the response is written, so the
+// writes run on their own background context with a timeout instead.
+func saveStateWithFallback(_ context.Context) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 
-	client, err := getSmClient()
-	if err != nil {
-		log.Printf("[Persist] SM client error, trying GCS: %v", err)
-	}
+	sheetsStatusMu.Lock()
+	lastLocalMutation = time.Now()
+	sheetsStatusMu.Unlock()
 
 	store.mu.RLock()
 	snap := persistedState{
@@ -367,6 +367,22 @@ func saveStateWithFallback(ctx context.Context) {
 	if err != nil {
 		log.Printf("[Persist] marshal error: %v", err)
 		return
+	}
+
+	if sheetsEnabled() {
+		if err := pushStateToSheet(ctx, data); err != nil {
+			log.Printf("[Persist] Google Sheets save failed: %v", err)
+		}
+	}
+
+	project := smProjectID()
+	if project == "" {
+		return
+	}
+
+	client, err := getSmClient()
+	if err != nil {
+		log.Printf("[Persist] SM client error, trying GCS: %v", err)
 	}
 
 	// Try Secret Manager
@@ -479,7 +495,7 @@ func restoreSnap(snap persistedState) bool {
 			}
 		}
 	}
-	log.Printf("[Persist] GCS state restored (saved %s): %d players, %d teams, %d matches",
+	log.Printf("[Persist] snapshot restored (saved %s): %d players, %d teams, %d matches",
 		snap.SavedAt.Format(time.RFC3339), len(store.players), len(store.teams), len(store.matches))
 	return true
 }
