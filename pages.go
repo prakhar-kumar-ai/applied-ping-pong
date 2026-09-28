@@ -139,9 +139,26 @@ const bracketPageHTML = `<!DOCTYPE html>
   }
   .overlay {
     min-height: 100vh;
-    background: linear-gradient(to bottom, rgba(0,0,0,0.75) 0%, rgba(0,0,0,0.85) 100%);
     padding: 0 0 60px 0;
   }
+  /* Background: photo with a slow drift, a readability gradient and a soft vignette */
+  .bg-photo {
+    position: fixed; inset: -4%; z-index: 0;
+    background: url('/bracket-bg.jpg') center/cover no-repeat;
+    animation: drift 40s ease-in-out infinite alternate;
+    will-change: transform;
+  }
+  @keyframes drift {
+    from { transform: scale(1) translate(0, 0); }
+    to   { transform: scale(1.08) translate(-1.5%, 1%); }
+  }
+  .bg-shade {
+    position: fixed; inset: 0; z-index: 1;
+    background:
+      radial-gradient(ellipse at 50% 35%, rgba(0,0,0,0) 0%, rgba(0,0,0,0.35) 75%, rgba(0,0,0,0.65) 100%),
+      linear-gradient(to bottom, rgba(6,14,20,0.25) 0%, rgba(6,14,20,0.5) 50%, rgba(4,8,12,0.82) 100%);
+  }
+  @media (prefers-reduced-motion: reduce) { .bg-photo { animation: none; } }
   /* Header */
   .header {
     padding: 24px 32px;
@@ -289,9 +306,9 @@ const bracketPageHTML = `<!DOCTYPE html>
 </style>
 </head>
 <body>
-<!-- Grayscale background image layer -->
-<div style="position:fixed;inset:0;z-index:0;background:url('/reg-bg.jpg') center/cover no-repeat;filter:grayscale(100%);"></div>
-<div style="position:fixed;inset:0;z-index:1;background:rgba(0,0,0,0.72);"></div>
+<!-- Background photo + readability shade -->
+<div class="bg-photo"></div>
+<div class="bg-shade"></div>
 
 <div class="overlay" style="position:relative;z-index:2;">
 
