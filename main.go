@@ -55,9 +55,14 @@ func main() {
 		logger.Info("anaheim client initialized successfully")
 	}
 
-	// Initialize tournament store and seed real tournament data
+	// Initialize tournament store.
+	// Try to restore from Secret Manager first; fall back to seeding fresh data.
 	store = newStore()
-	seedTournamentData()
+	if !loadStateWithFallback(context.Background()) {
+		seedTournamentData()
+		resumeFridayTournament()
+		go saveStateWithFallback(context.Background())
+	}
 	zap.L().Info("tournament store initialized")
 
 	registerSlackHandlers(bot)
