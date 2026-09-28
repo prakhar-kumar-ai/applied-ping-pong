@@ -281,6 +281,7 @@ func handleAdminCloseRegistration() gin.HandlerFunc {
 		store.mu.Lock()
 		store.registrationOpen = false
 		store.mu.Unlock()
+		go saveStateWithFallback(c.Request.Context())
 		c.JSON(http.StatusOK, gin.H{"registration_open": false})
 	}
 }
@@ -290,6 +291,7 @@ func handleAdminOpenRegistration() gin.HandlerFunc {
 		store.mu.Lock()
 		store.registrationOpen = true
 		store.mu.Unlock()
+		go saveStateWithFallback(c.Request.Context())
 		c.JSON(http.StatusOK, gin.H{"registration_open": true})
 	}
 }
@@ -333,6 +335,7 @@ func handleAdminRandomizeTeams() gin.HandlerFunc {
 		}
 
 		log.Printf("[Admin] created %d teams", len(newTeams))
+		go saveStateWithFallback(c.Request.Context())
 		c.JSON(http.StatusOK, gin.H{"teams_created": len(newTeams), "odd_player_id": oddPlayerID})
 	}
 }
@@ -396,6 +399,7 @@ func handleAdminSwapPlayers() gin.HandlerFunc {
 			team2.Player2 = p1
 		}
 
+		go saveStateWithFallback(c.Request.Context())
 		c.JSON(http.StatusOK, gin.H{"success": true})
 	}
 }
@@ -537,6 +541,7 @@ func handleAdminGenerateBracket() gin.HandlerFunc {
 		store.matchByID[final.ID] = final
 
 		log.Printf("[Admin] bracket generated: %d groups, %d RR matches, knockout=%d", numGroups, rrCount, knockoutSize)
+		go saveStateWithFallback(c.Request.Context())
 		c.JSON(http.StatusOK, gin.H{
 			"tournament_id": tournID,
 			"rr_matches":    rrCount,
@@ -674,6 +679,7 @@ func handleAdminEnterScore() gin.HandlerFunc {
 			}
 		}
 
+		go saveStateWithFallback(c.Request.Context())
 		c.JSON(http.StatusOK, gin.H{"success": true, "was_edit": wasComplete})
 	}
 }
@@ -959,6 +965,47 @@ func maybeAssignFinalFromSF() {
 	log.Printf("[Knockout] Final seeded from SF results")
 }
 
+// ---- Update player ----
+
+func handleAdminUpdatePlayer() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		playerID := c.Param("id")
+		var req struct {
+			Name  string `json:"name"`
+			Email string `json:"email"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if req.Name == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+			return
+		}
+
+		store.mu.Lock()
+		defer store.mu.Unlock()
+
+		p, ok := store.playerByID[playerID]
+		if !ok {
+			c.JSON(http.StatusNotFound, gin.H{"error": "player not found"})
+			return
+		}
+
+		oldName := p.Name
+		p.Name = strings.TrimSpace(req.Name)
+		if req.Email != "" && req.Email != p.Email {
+			delete(store.playerByEmail, p.Email)
+			p.Email = strings.TrimSpace(req.Email)
+			store.playerByEmail[p.Email] = p
+		}
+
+		log.Printf("[Admin] updated player %s: %q → %q", playerID, oldName, p.Name)
+		go saveStateWithFallback(c.Request.Context())
+		c.JSON(http.StatusOK, gin.H{"ok": true, "player": p})
+	}
+}
+
 // ---- Delete player ----
 
 func handleAdminDeletePlayer() gin.HandlerFunc {
@@ -1064,6 +1111,7 @@ func handleAdminForfeitMatch() gin.HandlerFunc {
 		}
 
 		log.Printf("[Admin] forfeit applied to match %s, forfeiter=%s", matchID, req.Forfeiter)
+		go saveStateWithFallback(c.Request.Context())
 		c.JSON(http.StatusOK, gin.H{"success": true})
 	}
 }
@@ -1115,6 +1163,7 @@ func handleAdminSeed() gin.HandlerFunc {
 		store.registrationOpen = false
 
 		log.Printf("[Admin] seed: populated %d teams (%d players)", len(store.teams), len(store.players))
+		go saveStateWithFallback(c.Request.Context())
 		c.JSON(http.StatusOK, gin.H{"ok": true, "teams": len(store.teams), "players": len(store.players)})
 	}
 }
@@ -1136,6 +1185,7 @@ func handleAdminReset() gin.HandlerFunc {
 		store.matchByID = make(map[string]*Match)
 		store.groupAssignments = nil
 		store.mu.Unlock()
+		go saveStateWithFallback(c.Request.Context())
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	}
 }
@@ -1296,6 +1346,148 @@ func seedTournamentData() {
 	log.Printf("[Seed] seeded %d players, %d teams — registration closed", len(store.players), len(store.teams))
 }
 
+// ---- Friday tournament resume ----
+
+// resumeFridayTournament reconstructs the exact bracket from the Friday session:
+// 4 groups (A-D) with the same team assignments, and re-applies the 3 completed match results.
+// Only runs if the store has teams but no tournament yet (fresh start with no saved state).
+// After this runs, saveState() persists it so future restarts load from Secret Manager.
+func resumeFridayTournament() {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	if store.tournament != nil || len(store.teams) == 0 {
+		return
+	}
+
+	// Build a lookup by Player1 name — matches seedTournamentData team order
+	byP1 := map[string]*Team{}
+	for _, t := range store.teams {
+		if t.Player1 != nil {
+			byP1[t.Player1.Name] = t
+		}
+	}
+
+	// Friday group assignments (exactly as they were)
+	groupA := []*Team{byP1["David Yi Yang"], byP1["Kaushek Kumar"], byP1["Monica Hsu"]}
+	groupB := []*Team{byP1["Harris Muhammad"], byP1["Yanzhao Yang"], byP1["Vivrd Prasanna"]}
+	groupC := []*Team{byP1["Sneha Ganesh"], byP1["Sanjit Kalapatapu"], byP1["Pranjal Sinha"]}
+	groupD := []*Team{byP1["Yash Kshirsagar"], byP1["Cameron Stewart"], byP1["Isiah Montalvo"]}
+	allGroups := [][]*Team{groupA, groupB, groupC, groupD}
+
+	tournID := newUUID()
+	store.tournament = &Tournament{
+		ID:           tournID,
+		Format:       "group_knockout",
+		Status:       "active",
+		NumGroups:    4,
+		KnockoutSize: 8,
+		CreatedAt:    time.Now(),
+	}
+	store.matches = nil
+	store.matchByID = make(map[string]*Match)
+
+	store.groupAssignments = make([][]string, 4)
+	for g, grp := range allGroups {
+		store.groupAssignments[g] = make([]string, len(grp))
+		for i, t := range grp {
+			if t == nil {
+				continue
+			}
+			store.groupAssignments[g][i] = t.ID
+			t.Locked = true
+		}
+	}
+
+	// Generate round-robin matches for each group
+	for g, grp := range allGroups {
+		pairings := generateRRSchedule(len(grp))
+		roundCounts := map[int]int{}
+		for _, p := range pairings {
+			order := roundCounts[p.RoundNumber]
+			m := &Match{
+				ID:          newUUID(),
+				TournamentID: tournID,
+				Team1:       grp[p.Team1Idx],
+				Team2:       grp[p.Team2Idx],
+				Status:      "pending",
+				Round:       "rr",
+				MatchOrder:  order,
+				RoundNumber: p.RoundNumber,
+				GroupNumber: g,
+				CreatedAt:   time.Now(),
+			}
+			store.matches = append(store.matches, m)
+			store.matchByID[m.ID] = m
+			roundCounts[p.RoundNumber]++
+		}
+	}
+
+	// Knockout placeholders: QF (4) + SF (2) + Final (1)
+	for i := 0; i < 4; i++ {
+		m := &Match{ID: newUUID(), TournamentID: tournID, Status: "pending", Round: "qf", MatchOrder: i, GroupNumber: -1, CreatedAt: time.Now()}
+		store.matches = append(store.matches, m)
+		store.matchByID[m.ID] = m
+	}
+	for i := 0; i < 2; i++ {
+		m := &Match{ID: newUUID(), TournamentID: tournID, Status: "pending", Round: "sf", MatchOrder: i, GroupNumber: -1, CreatedAt: time.Now()}
+		store.matches = append(store.matches, m)
+		store.matchByID[m.ID] = m
+	}
+	fin := &Match{ID: newUUID(), TournamentID: tournID, Status: "pending", Round: "final", MatchOrder: 0, GroupNumber: -1, CreatedAt: time.Now()}
+	store.matches = append(store.matches, fin)
+	store.matchByID[fin.ID] = fin
+
+	// Re-apply Friday's completed results (placeholder game scores used since
+	// exact point totals aren't recoverable — admins can re-edit if needed):
+	//   Group A: David Yi Yang & Prakhar Kumar  beat  Monica Hsu & Aditya J
+	//   Group D: Yash Kshirsagar & Sean Nelson  beat  Cameron Stewart & Heather Wattles
+	//   Group D: Yash Kshirsagar & Sean Nelson  beat  Isiah Montalvo & Kesha Srivatsan
+	type result struct{ winnerP1, loserP1 string }
+	fridayResults := []result{
+		{"David Yi Yang", "Monica Hsu"},
+		{"Yash Kshirsagar", "Cameron Stewart"},
+		{"Yash Kshirsagar", "Isiah Montalvo"},
+	}
+	for _, fr := range fridayResults {
+		for _, m := range store.matches {
+			if m.Round != "rr" || m.Status == "complete" || m.Team1 == nil || m.Team2 == nil {
+				continue
+			}
+			t1p1 := m.Team1.Player1 != nil && m.Team1.Player1.Name == fr.winnerP1
+			t2p1 := m.Team2.Player1 != nil && m.Team2.Player1.Name == fr.winnerP1
+			t1l := m.Team1.Player1 != nil && m.Team1.Player1.Name == fr.loserP1
+			t2l := m.Team2.Player1 != nil && m.Team2.Player1.Name == fr.loserP1
+			if !((t1p1 && t2l) || (t2p1 && t1l)) {
+				continue
+			}
+			t1w, t2w := 2, 0
+			gs := []GameScore{
+				{Team1Score: intPtr(21), Team2Score: intPtr(15)},
+				{Team1Score: intPtr(21), Team2Score: intPtr(15)},
+			}
+			winID := m.Team1.ID
+			if t2p1 {
+				t1w, t2w = 0, 2
+				gs = []GameScore{
+					{Team1Score: intPtr(15), Team2Score: intPtr(21)},
+					{Team1Score: intPtr(15), Team2Score: intPtr(21)},
+				}
+				winID = m.Team2.ID
+			}
+			m.Team1Score = &t1w
+			m.Team2Score = &t2w
+			m.Games = gs
+			m.WinnerTeamID = &winID
+			m.Status = "complete"
+			log.Printf("[Resume] applied Friday result: %s beat %s (match %s)", fr.winnerP1, fr.loserP1, m.ID)
+			break
+		}
+	}
+
+	log.Printf("[Resume] Friday tournament restored: 4 groups, %d total matches, 3 completed", len(store.matches))
+}
+
 // ---- Route registration ----
 
 func registerTournamentRoutes(api *gin.RouterGroup) {
@@ -1315,6 +1507,7 @@ func registerTournamentRoutes(api *gin.RouterGroup) {
 	admin.POST("/bracket/generate", handleAdminGenerateBracket())
 	admin.POST("/matches/:id/score", handleAdminEnterScore())
 	admin.POST("/matches/:id/forfeit", handleAdminForfeitMatch())
+	admin.PUT("/players/:id", handleAdminUpdatePlayer())
 	admin.DELETE("/players/:id", handleAdminDeletePlayer())
 	admin.POST("/reset", handleAdminReset())
 	admin.POST("/seed", handleAdminSeed())
