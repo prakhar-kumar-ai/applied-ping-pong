@@ -884,6 +884,27 @@ func maybeAssignFromRR() {
 
 		// Standard QF seeding: 1v8, 2v7, 3v6, 4v5
 		pairings := [][2]int{{0, 7}, {1, 6}, {2, 5}, {3, 4}}
+
+		// A group's 1st and 2nd must not meet again in the QF: when a pairing is
+		// same-group, swap its runner-up with another pairing's runner-up, provided
+		// that leaves both pairings cross-group.
+		sameGroup := func(a, b int) bool {
+			return a < len(seeded) && b < len(seeded) && seeded[a].groupIdx == seeded[b].groupIdx
+		}
+		for i := range pairings {
+			if !sameGroup(pairings[i][0], pairings[i][1]) {
+				continue
+			}
+			for j := range pairings {
+				if j == i || sameGroup(pairings[i][0], pairings[j][1]) || sameGroup(pairings[j][0], pairings[i][1]) {
+					continue
+				}
+				pairings[i][1], pairings[j][1] = pairings[j][1], pairings[i][1]
+				log.Printf("[Knockout] QF%d and QF%d runners swapped to avoid a same-group quarter-final", i+1, j+1)
+				break
+			}
+		}
+
 		for i, pair := range pairings {
 			qf := findMatch("qf", i)
 			if qf != nil {
