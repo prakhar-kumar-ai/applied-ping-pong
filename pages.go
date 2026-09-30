@@ -739,37 +739,18 @@ const adminPageHTML = `<!DOCTYPE html>
       <div id="hdrTeam2" class="text-xs font-bold text-gray-500 text-center truncate uppercase tracking-wide"></div>
     </div>
 
-    <!-- Game rows -->
-    <div class="space-y-2 mb-3">
-      <div style="display:grid;grid-template-columns:64px 1fr 20px 1fr;gap:6px;align-items:center;">
-        <span class="text-xs font-semibold text-gray-400 text-right pr-2">Game 1</span>
-        <input id="g1t1" type="number" min="0" oninput="updateTally()" placeholder="—"
-          class="border rounded-lg px-2 py-2 text-center text-xl font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500 w-full"/>
-        <span class="text-gray-300 font-bold text-center">–</span>
-        <input id="g1t2" type="number" min="0" oninput="updateTally()" placeholder="—"
-          class="border rounded-lg px-2 py-2 text-center text-xl font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500 w-full"/>
-      </div>
-      <div style="display:grid;grid-template-columns:64px 1fr 20px 1fr;gap:6px;align-items:center;">
-        <span class="text-xs font-semibold text-gray-400 text-right pr-2">Game 2</span>
-        <input id="g2t1" type="number" min="0" oninput="updateTally()" placeholder="—"
-          class="border rounded-lg px-2 py-2 text-center text-xl font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500 w-full"/>
-        <span class="text-gray-300 font-bold text-center">–</span>
-        <input id="g2t2" type="number" min="0" oninput="updateTally()" placeholder="—"
-          class="border rounded-lg px-2 py-2 text-center text-xl font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500 w-full"/>
-      </div>
-      <div id="game3row" style="display:grid;grid-template-columns:64px 1fr 20px 1fr;gap:6px;align-items:center;opacity:0.35;">
-        <span class="text-xs font-semibold text-gray-400 text-right pr-2">Game 3</span>
-        <input id="g3t1" type="number" min="0" oninput="updateTally()" placeholder="—" disabled
-          class="border rounded-lg px-2 py-2 text-center text-xl font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500 w-full bg-gray-50"/>
-        <span class="text-gray-300 font-bold text-center">–</span>
-        <input id="g3t2" type="number" min="0" oninput="updateTally()" placeholder="—" disabled
-          class="border rounded-lg px-2 py-2 text-center text-xl font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500 w-full bg-gray-50"/>
-      </div>
+    <!-- Match format (knockout matches only) -->
+    <div id="formatRow" class="flex items-center justify-between gap-3 mb-3 hidden">
+      <span class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Match format</span>
+      <div id="formatBtns" class="flex gap-1"></div>
     </div>
+
+    <!-- Game rows (rendered by renderGameRows) -->
+    <div id="gameRows" class="space-y-2 mb-3"></div>
 
     <!-- Live tally -->
     <div id="tallyDisplay" class="text-center py-2 px-3 bg-gray-50 rounded-lg mb-4 text-sm font-medium text-gray-400">
-      Enter scores above — Game 3 unlocks if needed
+      Enter scores above — later games unlock as needed
     </div>
 
     <div class="flex gap-3">
@@ -1352,6 +1333,53 @@ async function loadBracket() {
   } catch(e) { el.innerHTML = '<p class="text-red-400">Failed to load bracket.</p>'; }
 }
 
+let currentBestOf = 3;
+const FORMAT_OPTIONS = [3, 5, 7, 9];
+const KNOCKOUT_ROUNDS = ['qf', 'sf', 'final'];
+
+function gamesNeeded() { return Math.floor(currentBestOf / 2) + 1; }
+
+function renderFormatButtons() {
+  const wrap = document.getElementById('formatBtns');
+  wrap.innerHTML = FORMAT_OPTIONS.map(n => {
+    const active = n === currentBestOf;
+    const cls = active
+      ? 'px-2.5 py-1 rounded-md text-xs font-bold bg-indigo-600 text-white'
+      : 'px-2.5 py-1 rounded-md text-xs font-semibold bg-gray-100 text-gray-600 hover:bg-gray-200';
+    return '<button type="button" class="' + cls + '" onclick="setBestOf(' + n + ')">Bo' + n + '</button>';
+  }).join('');
+}
+
+function setBestOf(n) {
+  if (n === currentBestOf) return;
+  // Keep whatever scores are already typed in
+  const existing = collectGames(true);
+  currentBestOf = n;
+  renderFormatButtons();
+  renderGameRows(existing);
+  updateTally();
+}
+
+function renderGameRows(games) {
+  const wrap = document.getElementById('gameRows');
+  let html = '';
+  for (let k = 1; k <= currentBestOf; k++) {
+    html += '<div id="game' + k + 'row" style="display:grid;grid-template-columns:64px 1fr 20px 1fr;gap:6px;align-items:center;">' +
+      '<span class="text-xs font-semibold text-gray-400 text-right pr-2">Game ' + k + '</span>' +
+      '<input id="g' + k + 't1" type="number" min="0" oninput="updateTally()" placeholder="—" class="border rounded-lg px-2 py-2 text-center text-xl font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500 w-full"/>' +
+      '<span class="text-gray-300 font-bold text-center">–</span>' +
+      '<input id="g' + k + 't2" type="number" min="0" oninput="updateTally()" placeholder="—" class="border rounded-lg px-2 py-2 text-center text-xl font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500 w-full"/>' +
+      '</div>';
+  }
+  wrap.innerHTML = html;
+  (games || []).forEach((g, i) => {
+    const k = i + 1;
+    if (k > currentBestOf) return;
+    document.getElementById('g' + k + 't1').value = g.team1_score ?? '';
+    document.getElementById('g' + k + 't2').value = g.team2_score ?? '';
+  });
+}
+
 function openModal(matchID) {
   const m = allMatches[matchID];
   if (!m) return;
@@ -1365,25 +1393,17 @@ function openModal(matchID) {
   document.getElementById('forfeit1Label').textContent = currentTeam1Name;
   document.getElementById('forfeit2Label').textContent = currentTeam2Name;
 
-  // Clear all inputs first
-  ['g1t1','g1t2','g2t1','g2t2','g3t1','g3t2'].forEach(id => {
-    document.getElementById(id).value = '';
-  });
-
-  // Populate existing game scores if re-editing
+  const isKnockout = KNOCKOUT_ROUNDS.includes(m.round);
   const games = m.games || [];
-  if (games[0]) {
-    document.getElementById('g1t1').value = games[0].team1_score ?? '';
-    document.getElementById('g1t2').value = games[0].team2_score ?? '';
-  }
-  if (games[1]) {
-    document.getElementById('g2t1').value = games[1].team1_score ?? '';
-    document.getElementById('g2t2').value = games[1].team2_score ?? '';
-  }
-  if (games[2]) {
-    document.getElementById('g3t1').value = games[2].team1_score ?? '';
-    document.getElementById('g3t2').value = games[2].team2_score ?? '';
-  }
+  // Format: the match's saved format, else Bo5 for knockout rounds, else Bo3.
+  // Never show fewer rows than games already recorded.
+  let bo = (m.best_of && m.best_of % 2 === 1) ? m.best_of : (isKnockout ? 5 : 3);
+  while (bo < games.length && bo < 9) bo += 2;
+  currentBestOf = bo;
+
+  document.getElementById('formatRow').classList.toggle('hidden', !isKnockout);
+  renderFormatButtons();
+  renderGameRows(games);
 
   document.getElementById('scoreModal').classList.remove('hidden');
   updateTally();
@@ -1395,66 +1415,78 @@ function closeModal() {
 }
 
 function parseScore(id) {
-  const v = document.getElementById(id).value;
+  const el = document.getElementById(id);
+  if (!el) return null;
+  const v = el.value;
   if (v === '' || v === null || v === undefined) return null;
   const n = parseInt(v);
   return isNaN(n) ? null : n;
 }
 
+// Collect the game rows that are enabled and filled in. With lenient=true,
+// partially filled rows are skipped instead of erroring (used when switching format).
+function collectGames(lenient) {
+  const games = [];
+  for (let k = 1; k <= currentBestOf; k++) {
+    const el1 = document.getElementById('g' + k + 't1');
+    if (!el1 || el1.disabled) continue;
+    const s1 = parseScore('g' + k + 't1'), s2 = parseScore('g' + k + 't2');
+    if (s1 === null && s2 === null) continue;
+    if (s1 === null || s2 === null) {
+      if (lenient) continue;
+      return null;
+    }
+    games.push({team1_score: s1, team2_score: s2});
+  }
+  return games;
+}
+
 function updateTally() {
+  const needed = gamesNeeded();
   let t1Wins = 0, t2Wins = 0;
 
-  // Score game 1 and 2 only (always visible)
-  const g1t1 = parseScore('g1t1'), g1t2 = parseScore('g1t2');
-  const g2t1 = parseScore('g2t1'), g2t2 = parseScore('g2t2');
+  for (let k = 1; k <= currentBestOf; k++) {
+    const row = document.getElementById('game' + k + 'row');
+    const el1 = document.getElementById('g' + k + 't1');
+    const el2 = document.getElementById('g' + k + 't2');
+    if (!row || !el1 || !el2) continue;
 
-  if (g1t1 !== null && g1t2 !== null && g1t1 !== g1t2) {
-    if (g1t1 > g1t2) t1Wins++; else t2Wins++;
-  }
-  if (g2t1 !== null && g2t2 !== null && g2t1 !== g2t2) {
-    if (g2t1 > g2t2) t1Wins++; else t2Wins++;
-  }
-
-  // Game 3 only needed when it's 1-1 after games 1+2
-  const needsGame3 = t1Wins === 1 && t2Wins === 1;
-  const game3row = document.getElementById('game3row');
-  const g3t1el = document.getElementById('g3t1');
-  const g3t2el = document.getElementById('g3t2');
-
-  if (needsGame3) {
-    game3row.style.opacity = '1';
-    g3t1el.disabled = false;
-    g3t2el.disabled = false;
-    // Also tally game 3
-    const g3t1 = parseScore('g3t1'), g3t2 = parseScore('g3t2');
-    if (g3t1 !== null && g3t2 !== null && g3t1 !== g3t2) {
-      if (g3t1 > g3t2) t1Wins++; else t2Wins++;
+    // A game is only playable while nobody has reached the required wins yet.
+    const decided = t1Wins >= needed || t2Wins >= needed;
+    if (decided) {
+      row.style.opacity = '0.35';
+      el1.disabled = true; el2.disabled = true;
+      el1.value = ''; el2.value = '';
+      el1.classList.add('bg-gray-50'); el2.classList.add('bg-gray-50');
+      continue;
     }
-  } else {
-    game3row.style.opacity = '0.35';
-    g3t1el.disabled = true;
-    g3t2el.disabled = true;
-    g3t1el.value = '';
-    g3t2el.value = '';
+    row.style.opacity = '1';
+    el1.disabled = false; el2.disabled = false;
+    el1.classList.remove('bg-gray-50'); el2.classList.remove('bg-gray-50');
+
+    const s1 = parseScore('g' + k + 't1'), s2 = parseScore('g' + k + 't2');
+    if (s1 !== null && s2 !== null && s1 !== s2) {
+      if (s1 > s2) t1Wins++; else t2Wins++;
+    }
   }
 
   const tally = document.getElementById('tallyDisplay');
   if (t1Wins === 0 && t2Wins === 0) {
-    tally.textContent = 'Enter scores above — Game 3 unlocks if needed';
+    tally.textContent = 'Best of ' + currentBestOf + ' — first to ' + needed + ' games wins';
     tally.className = 'text-center py-2 px-3 bg-gray-50 rounded-lg mb-4 text-sm font-medium text-gray-400';
-  } else if (t1Wins === 2 || t2Wins === 2) {
-    const winner = t1Wins === 2 ? currentTeam1Name : currentTeam2Name;
-    tally.innerHTML = '🏆 <strong>' + winner + '</strong> wins ' + t1Wins + '–' + t2Wins;
+  } else if (t1Wins >= needed || t2Wins >= needed) {
+    const winner = t1Wins >= needed ? currentTeam1Name : currentTeam2Name;
+    tally.innerHTML = '🏆 <strong>' + winner + '</strong> wins ' + t1Wins + '–' + t2Wins + ' <span class="text-green-500 font-medium">(Bo' + currentBestOf + ')</span>';
     tally.className = 'text-center py-2 px-3 bg-green-50 border border-green-200 rounded-lg mb-4 text-sm font-semibold text-green-700';
   } else {
-    tally.textContent = currentTeam1Name + ': ' + t1Wins + (t1Wins===1?' game':' games') + '  ·  ' + currentTeam2Name + ': ' + t2Wins + (t2Wins===1?' game':' games');
+    tally.textContent = currentTeam1Name + ': ' + t1Wins + (t1Wins===1?' game':' games') + '  ·  ' + currentTeam2Name + ': ' + t2Wins + (t2Wins===1?' game':' games') + '  (first to ' + needed + ')';
     tally.className = 'text-center py-2 px-3 bg-blue-50 border border-blue-100 rounded-lg mb-4 text-sm font-medium text-blue-600';
   }
 }
 
 async function submitForfeit(forfeiter) {
   const fName = forfeiter === 'team1' ? currentTeam1Name : currentTeam2Name;
-  if (!confirm('Mark "' + fName + '" as forfeit? They receive a 0–11 loss and the other team advances.')) return;
+  if (!confirm('Mark "' + fName + '" as forfeit? They receive 0–11 losses for the match and the other team advances.')) return;
   const btn = document.getElementById('saveBtn');
   btn.textContent = 'Saving...'; btn.disabled = true;
   try {
@@ -1544,20 +1576,10 @@ async function autoSchedule() {
 }
 
 async function submitScore() {
-  // Collect filled-in game scores
-  const gamePairs = [['g1t1','g1t2'],['g2t1','g2t2'],['g3t1','g3t2']];
-  const games = [];
-  for (const [id1, id2] of gamePairs) {
-    const el1 = document.getElementById(id1);
-    const el2 = document.getElementById(id2);
-    if (el1.disabled) continue; // game 3 disabled = not needed
-    const s1 = parseScore(id1), s2 = parseScore(id2);
-    if (s1 === null && s2 === null) continue; // both empty = game not played
-    if (s1 === null || s2 === null) {
-      alert('Please enter both scores for each game you started.');
-      return;
-    }
-    games.push({team1_score: s1, team2_score: s2});
+  const games = collectGames(false);
+  if (games === null) {
+    alert('Please enter both scores for each game you started.');
+    return;
   }
   if (games.length === 0) {
     alert('Please enter at least one game score.');
@@ -1568,7 +1590,7 @@ async function submitScore() {
   try {
     const res = await adminFetch('/api/admin/matches/'+currentMatchID+'/score', {
       method: 'POST',
-      body: JSON.stringify({games})
+      body: JSON.stringify({games, best_of: currentBestOf})
     });
     if (res.ok) { closeModal(); loadBracket(); }
     else {

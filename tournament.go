@@ -48,7 +48,8 @@ type Match struct {
 	Team2         *Team       `json:"team2"`
 	Team1Score    *int        `json:"team1_score"`   // number of games won by team 1
 	Team2Score    *int        `json:"team2_score"`   // number of games won by team 2
-	Games         []GameScore `json:"games"`         // per-game point scores (best of 3)
+	Games         []GameScore `json:"games"`         // per-game point scores
+	BestOf        int         `json:"best_of"`       // 3, 5, 7 … ; 0 = default (3)
 	WinnerTeamID  *string     `json:"winner_team_id"`
 	Status        string      `json:"status"`       // pending | complete
 	Round         string      `json:"round"`        // rr | qf | sf | final
@@ -558,19 +559,17 @@ func handleAdminEnterScore() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		matchID := c.Param("id")
 		var req struct {
-			Games []GameScore `json:"games"`
+			Games  []GameScore `json:"games"`
+			BestOf int         `json:"best_of"` // optional: 3, 5, 7 …; omitted = keep the match's format (default 3)
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		t1Wins, t2Wins, err := validateGames(req.Games)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		if req.BestOf != 0 && !validBestOf(req.BestOf) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "best_of must be an odd number between 1 and 9"})
 			return
 		}
-
-		log.Printf("[Admin] POST /api/admin/matches/%s/score: %d games played, t1Wins=%d t2Wins=%d", matchID, len(req.Games), t1Wins, t2Wins)
 
 		store.mu.Lock()
 		defer store.mu.Unlock()
@@ -581,6 +580,19 @@ func handleAdminEnterScore() gin.HandlerFunc {
 			return
 		}
 
+		bestOf := matchBestOf(m)
+		if req.BestOf != 0 {
+			bestOf = req.BestOf
+		}
+		t1Wins, t2Wins, err := validateGames(req.Games, bestOf)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		log.Printf("[Admin] POST /api/admin/matches/%s/score: best of %d, %d games played, t1Wins=%d t2Wins=%d", matchID, bestOf, len(req.Games), t1Wins, t2Wins)
+
+		m.BestOf = bestOf
 		wasComplete := applyMatchScore(m, req.Games, t1Wins, t2Wins)
 
 		go saveStateWithFallback(c.Request.Context())
@@ -588,12 +600,29 @@ func handleAdminEnterScore() gin.HandlerFunc {
 	}
 }
 
-// validateGames checks a best-of-3 game list (1–3 games, both scores present, no ties,
-// one team with 2 wins) and returns the game-win tally. Shared by the admin API and the
-// Google Sheets pull so both paths enforce identical rules.
-func validateGames(games []GameScore) (t1Wins, t2Wins int, err error) {
-	if len(games) == 0 || len(games) > 3 {
-		return 0, 0, fmt.Errorf("must provide 1–3 games")
+// validBestOf accepts the supported match formats: best of 1, 3, 5, 7 or 9.
+func validBestOf(n int) bool { return n >= 1 && n <= 9 && n%2 == 1 }
+
+// matchBestOf returns the match's format, defaulting to best of 3 for matches created
+// before formats existed (BestOf == 0).
+func matchBestOf(m *Match) int {
+	if m != nil && validBestOf(m.BestOf) {
+		return m.BestOf
+	}
+	return 3
+}
+
+// validateGames checks a game list against a best-of-N format (1–N games, both scores
+// present, no ties, exactly one team reaching the (N+1)/2 wins needed, no games after the
+// deciding one) and returns the game-win tally. Shared by the admin API and the Google
+// Sheets pull so both paths enforce identical rules.
+func validateGames(games []GameScore, bestOf int) (t1Wins, t2Wins int, err error) {
+	if !validBestOf(bestOf) {
+		bestOf = 3
+	}
+	needed := bestOf/2 + 1
+	if len(games) == 0 || len(games) > bestOf {
+		return 0, 0, fmt.Errorf("must provide 1–%d games for a best of %d", bestOf, bestOf)
 	}
 	for i, g := range games {
 		if g.Team1Score == nil || g.Team2Score == nil {
@@ -611,9 +640,12 @@ func validateGames(games []GameScore) (t1Wins, t2Wins int, err error) {
 			t2Wins++
 		}
 	}
-	// One team must have won 2 games (best of 3).
-	if t1Wins < 2 && t2Wins < 2 {
-		return 0, 0, fmt.Errorf("match not decided — a team needs 2 game wins")
+	// Exactly one team reaches the required wins, and play stops there.
+	if t1Wins < needed && t2Wins < needed {
+		return 0, 0, fmt.Errorf("match not decided — a team needs %d game wins (best of %d)", needed, bestOf)
+	}
+	if t1Wins > needed || t2Wins > needed {
+		return 0, 0, fmt.Errorf("too many games — the match was already decided at %d wins (best of %d)", needed, bestOf)
 	}
 	return t1Wins, t2Wins, nil
 }
@@ -1107,24 +1139,23 @@ func handleAdminForfeitMatch() gin.HandlerFunc {
 
 		wasComplete := m.Status == "complete"
 
+		// The forfeiting team loses every game needed for the match's format (11–0 each).
+		needed := matchBestOf(m)/2 + 1
+		m.Games = nil
 		if req.Forfeiter == "team1" {
-			// team1 forfeits: loses 0–2 games (11-0 per game for the winner)
-			m.Games = []GameScore{
-				{Team1Score: intPtr(0), Team2Score: intPtr(11)},
-				{Team1Score: intPtr(0), Team2Score: intPtr(11)},
+			for i := 0; i < needed; i++ {
+				m.Games = append(m.Games, GameScore{Team1Score: intPtr(0), Team2Score: intPtr(11)})
 			}
-			s1, s2 := 0, 2
+			s1, s2 := 0, needed
 			m.Team1Score = &s1
 			m.Team2Score = &s2
 			wid := m.Team2.ID
 			m.WinnerTeamID = &wid
 		} else {
-			// team2 forfeits: loses 0–2 games
-			m.Games = []GameScore{
-				{Team1Score: intPtr(11), Team2Score: intPtr(0)},
-				{Team1Score: intPtr(11), Team2Score: intPtr(0)},
+			for i := 0; i < needed; i++ {
+				m.Games = append(m.Games, GameScore{Team1Score: intPtr(11), Team2Score: intPtr(0)})
 			}
-			s1, s2 := 2, 0
+			s1, s2 := needed, 0
 			m.Team1Score = &s1
 			m.Team2Score = &s2
 			wid := m.Team1.ID

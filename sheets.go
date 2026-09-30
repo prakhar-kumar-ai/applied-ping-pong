@@ -596,7 +596,7 @@ func syncFromSheet(ctx context.Context) (sheetPullResult, error) {
 				res.Warnings = append(res.Warnings, label+": teams not assigned yet — score not applied")
 				continue
 			}
-			t1, t2, err := validateGames(games)
+			t1, t2, err := validateGames(games, matchBestOf(m))
 			if err != nil {
 				res.Warnings = append(res.Warnings, label+": "+err.Error()+" — not applied")
 				continue
