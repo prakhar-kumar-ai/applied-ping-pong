@@ -976,27 +976,64 @@ func maybeAssignSFFromQF() {
 			sf2 = m
 		}
 	}
-	// SF1: QF1w vs QF2w (top quarter)
-	// SF2: QF3w vs QF4w (bottom quarter)
+	// Default seeding — SF1: QF1w vs QF2w (top quarter), SF2: QF3w vs QF4w (bottom quarter).
+	// Slots that are already filled (e.g. an SF entered ahead of a late QF) are never
+	// overwritten, and a winner already placed in an SF is not seeded a second time —
+	// leftover winners go to the remaining empty slots instead.
+	winnerOf := func(i int) *Team {
+		if qfs[i] == nil || qfs[i].WinnerTeamID == nil {
+			return nil
+		}
+		return store.teamByID[*qfs[i].WinnerTeamID]
+	}
+	type slot struct {
+		dst **Team
+		def *Team
+	}
+	var slots []slot
 	if sf1 != nil {
-		if qfs[0] != nil && qfs[0].WinnerTeamID != nil {
-			sf1.Team1 = store.teamByID[*qfs[0].WinnerTeamID]
-		}
-		if qfs[1] != nil && qfs[1].WinnerTeamID != nil {
-			sf1.Team2 = store.teamByID[*qfs[1].WinnerTeamID]
-		}
+		slots = append(slots, slot{&sf1.Team1, winnerOf(0)}, slot{&sf1.Team2, winnerOf(1)})
 	}
 	if sf2 != nil {
-		if qfs[2] != nil && qfs[2].WinnerTeamID != nil {
-			sf2.Team1 = store.teamByID[*qfs[2].WinnerTeamID]
+		slots = append(slots, slot{&sf2.Team1, winnerOf(2)}, slot{&sf2.Team2, winnerOf(3)})
+	}
+	placed := map[string]bool{}
+	for _, sl := range slots {
+		if *sl.dst != nil {
+			placed[(*sl.dst).ID] = true
 		}
-		if qfs[3] != nil && qfs[3].WinnerTeamID != nil {
-			sf2.Team2 = store.teamByID[*qfs[3].WinnerTeamID]
+	}
+	var leftovers []*Team
+	for i := 0; i < 4; i++ {
+		if w := winnerOf(i); w != nil && !placed[w.ID] {
+			leftovers = append(leftovers, w)
+		}
+	}
+	for _, sl := range slots {
+		if *sl.dst != nil {
+			continue
+		}
+		var pick *Team
+		if sl.def != nil && !placed[sl.def.ID] {
+			pick = sl.def
+		} else if len(leftovers) > 0 {
+			pick = leftovers[0]
+		}
+		if pick == nil {
+			continue
+		}
+		*sl.dst = pick
+		placed[pick.ID] = true
+		for i, t := range leftovers {
+			if t.ID == pick.ID {
+				leftovers = append(leftovers[:i], leftovers[i+1:]...)
+				break
+			}
 		}
 	}
 }
 
-// maybeAssignFinalFromSF seeds the Final once both SF matches are complete.
+// maybeAssignFinalFromSF seeds each Final slot from its SF winner once that SF is complete.
 // Must be called with store.mu held (write).
 func maybeAssignFinalFromSF() {
 	var sf1, sf2 *Match
@@ -1008,9 +1045,6 @@ func maybeAssignFinalFromSF() {
 			sf2 = m
 		}
 	}
-	if sf1 == nil || sf2 == nil || sf1.Status != "complete" || sf2.Status != "complete" {
-		return
-	}
 	var finalMatch *Match
 	for _, m := range store.matches {
 		if m.Round == "final" {
@@ -1021,10 +1055,12 @@ func maybeAssignFinalFromSF() {
 	if finalMatch == nil {
 		return
 	}
-	if sf1.WinnerTeamID != nil {
+	// Each Final slot is seeded as soon as its SF is complete, so the bracket shows
+	// the first finalist while the other SF is still pending.
+	if sf1 != nil && sf1.Status == "complete" && sf1.WinnerTeamID != nil {
 		finalMatch.Team1 = store.teamByID[*sf1.WinnerTeamID]
 	}
-	if sf2.WinnerTeamID != nil {
+	if sf2 != nil && sf2.Status == "complete" && sf2.WinnerTeamID != nil {
 		finalMatch.Team2 = store.teamByID[*sf2.WinnerTeamID]
 	}
 	log.Printf("[Knockout] Final seeded from SF results")
